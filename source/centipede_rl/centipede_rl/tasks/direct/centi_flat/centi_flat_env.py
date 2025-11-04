@@ -1,170 +1,145 @@
-# source/centipede_rl/centipede_rl/tasks/direct/centi_flat/centi_flat_env.py
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
-import math, torch
-from isaaclab.envs import DirectRLEnv
-from isaaclab.assets import Articulation
+
+import math
+from collections.abc import Sequence
+import torch
+
 import isaaclab.sim as sim_utils
+from isaaclab.assets import Articulation
+from isaaclab.envs import DirectRLEnv
+from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
+from isaaclab.utils.math import sample_uniform
 
-from .centi_flat_env_cfg import CentipedeVelTrackEnvCfg
+from .centi_flat_env_cfg import CentiFlatEnvCfg
 
-# Optional: set this to your floor USD path if you have one.
-# Otherwise the GroundPlane is enough for training.
-FLOOR_USD = None
-# Example: FLOOR_USD = r"J:/path/to/your/project/source/centipede_rl/centipede_rl/assets/usd/floor.usd"
 
-class CentipedeVelTrackEnv(DirectRLEnv):
-    cfg: CentipedeVelTrackEnvCfg
+class CentiFlatEnv(DirectRLEnv):
+    cfg: CentiFlatEnvCfg
 
-    def __init__(self, cfg: CentipedeVelTrackEnvCfg, **kw):
-        super().__init__(cfg, **kw)
+    def __init__(self, cfg: CentiFlatEnvCfg, render_mode: str | None = None, **kwargs):
+        super().__init__(cfg, render_mode, **kwargs)
+        # Resolve joint indices you want to control/observe (edit names in cfg)
+        self._cart_dof_idx, _ = self.robot.find_joints(self.cfg.cart_dof_name)
+        self._pole_dof_idx, _ = self.robot.find_joints(self.cfg.pole_dof_name)
+        self.joint_pos = self.robot.data.joint_pos
+        self.joint_vel = self.robot.data.joint_vel
 
-        # ---- Add ground / floor here (NOT via InteractiveSceneCfg) ----
-        if FLOOR_USD:
-            sim_utils.spawn_from_usd(
-                prim_path="/World/Floor",
-                cfg=sim_utils.UsdFileCfg(usd_path=FLOOR_USD),
-            )
-        else:
-            sim_utils.spawn_ground_plane(
-                prim_path="/World/Ground",
-                cfg=sim_utils.GroundPlaneCfg(),
-            )
-
-        # Robot handle (spawned by base class using cfg.robot)
-        self.robot: Articulation = self.scene["robot"]
-
-        # Pick joint groups to drive (adjust substrings to your USD joint names)
-        self._phase = torch.zeros(self.num_envs, device=self.device)
-        self._last_action = torch.zeros(self.num_envs, 4, device=self.device)
-        self._prev_action = torch.zeros(self.num_envs, 4, device=self.device)
-        self._cmd_vx = torch.zeros(self.num_envs, device=self.device)
-        self._resample_timer = torch.zeros(self.num_envs, device=self.device)
-        self._time_left = torch.zeros(self.num_envs, device=self.device)
-        self._act_lo = torch.tensor(self.cfg.action_low, device=self.device)
-        self._act_hi = torch.tensor(self.cfg.action_high, device=self.device)
-
-        # joint grouping (now that self.robot exists)
-        jn = self.robot.joint_names
-        self._body_jids = [i for i, n in enumerate(jn) if "body" in n]
-        self._leg_jids  = [i for i, n in enumerate(jn) if "leg"  in n]
-
-    # ---------------- DirectRLEnv API ----------------
-
-    @property
-    def action_spec(self): return (4,)
-    @property
-    def observation_spec(self): return (7,)
-
+    # ----- Scene -----
     def _setup_scene(self):
-        # 1) create the articulation from your cfg
-        self.robot = Articulation(self.cfg.robot)
+        # Robot
+        self.robot = Articulation(self.cfg.robot_cfg)
 
-        import omni.usd
-        from pxr import Usd
+        # Ground
+        spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
 
-        stage = omni.usd.get_context().get_stage()
-        robot_prim = stage.GetPrimAtPath("/World/envs/env_0/Robot")
-        print("[DEBUG] Robot at /World/envs/env_0/Robot exists:", robot_prim.IsValid())
-
-        # list children so you can spot the articulation root name
-        if robot_prim:
-            print("[DEBUG] Children under /World/envs/env_0/Robot:")
-            for ch in robot_prim.GetChildren():
-                print("   ", ch.GetPath().pathString)
-
-        # 2) add ground or custom floor
-        if FLOOR_USD:
-            sim_utils.spawn_from_usd(
-                prim_path="/World/Floor",
-                cfg=sim_utils.UsdFileCfg(usd_path=FLOOR_USD),
-            )
-        else:
-            sim_utils.spawn_ground_plane(
-                prim_path="/World/Ground",
-                cfg=sim_utils.GroundPlaneCfg(),
-            )
-
-        # 3) clone vectorized environments and (CPU only) filter global collisions
+        # Clone envs
         self.scene.clone_environments(copy_from_source=False)
+
+        # CPU sim needs explicit filtering
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=[])
 
-        # 4) register entities in the scene with keys (this enables self.scene["robot"])
+        # Register in scene
         self.scene.articulations["robot"] = self.robot
 
-        # 5) optional light
-        dome = sim_utils.DomeLightCfg(intensity=2000.0)
-        dome.func("/World/Light", dome)
+        # Light
+        light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
+        light_cfg.func("/World/Light", light_cfg)
 
-    def _reset_idx(self, env_ids):
+    # ----- RL plumbing -----
+    def _pre_physics_step(self, actions: torch.Tensor) -> None:
+        self.actions = actions.clone()
+
+    def _apply_action(self) -> None:
+        # Scale and send efforts to a chosen DOF set (edit for your actuators)
+        self.robot.set_joint_effort_target(self.actions * self.cfg.action_scale, joint_ids=self._cart_dof_idx)
+
+    def _get_observations(self) -> dict:
+        # Build observation vector (edit to match your task)
+        obs = torch.cat(
+            (
+                self.joint_pos[:, self._pole_dof_idx[0]].unsqueeze(dim=1),
+                self.joint_vel[:, self._pole_dof_idx[0]].unsqueeze(dim=1),
+                self.joint_pos[:, self._cart_dof_idx[0]].unsqueeze(dim=1),
+                self.joint_vel[:, self._cart_dof_idx[0]].unsqueeze(dim=1),
+            ),
+            dim=-1,
+        )
+        return {"policy": obs}
+
+    def _get_rewards(self) -> torch.Tensor:
+        return compute_rewards(
+            self.cfg.rew_scale_alive,
+            self.cfg.rew_scale_terminated,
+            self.cfg.rew_scale_pole_pos,
+            self.cfg.rew_scale_cart_vel,
+            self.cfg.rew_scale_pole_vel,
+            self.joint_pos[:, self._pole_dof_idx[0]],
+            self.joint_vel[:, self._pole_dof_idx[0]],
+            self.joint_pos[:, self._cart_dof_idx[0]],
+            self.joint_vel[:, self._cart_dof_idx[0]],
+            self.reset_terminated,
+        )
+
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        self.joint_pos = self.robot.data.joint_pos
+        self.joint_vel = self.robot.data.joint_vel
+        time_out = self.episode_length_buf >= self.max_episode_length - 1
+
+
+        out_of_bounds = torch.any(torch.abs(self.joint_pos[:, self._cart_dof_idx]) > self.cfg.max_cart_pos, dim=1)
+        out_of_bounds = out_of_bounds | torch.any(
+            torch.abs(self.joint_pos[:, self._pole_dof_idx]) > math.pi / 2, dim=1
+        )
+        return out_of_bounds, time_out
+
+    def _reset_idx(self, env_ids: Sequence[int] | None):
+        if env_ids is None:
+            env_ids = self.robot._ALL_INDICES
         super()._reset_idx(env_ids)
-        self._phase[env_ids] = 0.0
-        self._last_action[env_ids].zero_()
-        self._prev_action[env_ids].zero_()
-        self._time_left[env_ids] = self.cfg.episode_length_s
-        self._sample_cmd(env_ids)
 
-    def _pre_physics_step(self, actions):
-        a = torch.clamp(actions, self._act_lo, self._act_hi)
-        self._prev_action = self._last_action.clone()
-        self._last_action = a
+        # Reset joints
+        joint_pos = self.robot.data.default_joint_pos[env_ids]
+        joint_pos[:, self._pole_dof_idx] += sample_uniform(
+            self.cfg.initial_pole_angle_range[0] * math.pi,
+            self.cfg.initial_pole_angle_range[1] * math.pi,
+            joint_pos[:, self._pole_dof_idx].shape,
+            joint_pos.device,
+        )
+        joint_vel = self.robot.data.default_joint_vel[env_ids]
 
-        wave_num, body_amp, leg_amp, v_amp = a[:,0], a[:,1], a[:,2], a[:,3]
-        dt = self.step_dt
-        self._phase = (self._phase + v_amp * dt * 2.0 * math.pi).fmod(2.0 * math.pi)
+        # Reset root pose per env origin
+        default_root_state = self.robot.data.default_root_state[env_ids]
+        default_root_state[:, :3] += self.scene.env_origins[env_ids]
 
-        if self._body_jids:
-            B = len(self._body_jids)
-            idx = torch.linspace(0, 1, B, device=self.device).unsqueeze(0)
-            offs = wave_num.unsqueeze(1) * (2.0 * math.pi) * idx
-            tgt  = body_amp.unsqueeze(1) * torch.sin(self._phase.unsqueeze(1) + offs)
-            self.robot.set_joint_position_target(tgt, joint_ids=self._body_jids)
+        # Write to sim
+        self.joint_pos[env_ids] = joint_pos
+        self.joint_vel[env_ids] = joint_vel
+        self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
+        self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+        self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
-        if self._leg_jids:
-            tgt = leg_amp.unsqueeze(1) * torch.sin(self._phase.unsqueeze(1))
-            self.robot.set_joint_position_target(tgt, joint_ids=self._leg_jids)
 
-        # resample commands periodically
-        self._resample_timer -= dt
-        mask = self._resample_timer <= 0
-        if torch.any(mask):
-            self._sample_cmd(torch.nonzero(mask).squeeze(-1))
+@torch.jit.script
+def compute_rewards(
+    rew_scale_alive: float,
+    rew_scale_terminated: float,
+    rew_scale_pole_pos: float,
+    rew_scale_cart_vel: float,
+    rew_scale_pole_vel: float,
+    pole_pos: torch.Tensor,
+    pole_vel: torch.Tensor,
+    cart_pos: torch.Tensor,
+    cart_vel: torch.Tensor,
+    reset_terminated: torch.Tensor,
+):
+    rew_alive = rew_scale_alive * (1.0 - reset_terminated.float())
+    rew_termination = rew_scale_terminated * reset_terminated.float()
+    rew_pole_pos = rew_scale_pole_pos * torch.sum(torch.square(pole_pos).unsqueeze(dim=1), dim=-1)
+    rew_cart_vel = rew_scale_cart_vel * torch.sum(torch.abs(cart_vel).unsqueeze(dim=1), dim=-1)
+    rew_pole_vel = rew_scale_pole_vel * torch.sum(torch.abs(pole_vel).unsqueeze(dim=1), dim=-1)
+    return rew_alive + rew_termination + rew_pole_pos + rew_cart_vel + rew_pole_vel
 
-        # episode time
-        self._time_left -= dt
-
-    def _get_observations(self):
-        R = self.robot.root_x_w[:, :3, :3]
-        v_w = self.robot.root_lin_vel_w
-        v_l = torch.einsum("nij,nj->ni", R.transpose(1,2), v_w)
-        obs = torch.cat([self._cmd_vx.unsqueeze(1), v_l[:, :2], self._last_action], dim=1)
-        return {"policy": obs}  # <-- dict, key = "policy"
-
-    def _get_rewards(self):
-        R = self.robot.root_x_w[:, :3, :3]
-        v_w = self.robot.root_lin_vel_w
-        vx  = torch.einsum("nij,nj->ni", R.transpose(1,2), v_w)[:, 0]
-
-        r_track  = self.cfg.w_track_speed * torch.exp(-2.0 * (vx - self._cmd_vx) ** 2)
-        r_smooth = self.cfg.w_action_rate * torch.sum((self._last_action - self._prev_action) ** 2, dim=1)
-        z_up     = R[:, 2, 2].clamp(min=0)          # upright proxy
-        r_up     = self.cfg.w_upright * z_up
-        return r_track + r_smooth + r_up
-
-    def _get_dones(self):
-        R = self.robot.root_x_w[:, :3, :3]
-        z = R[:, 2, 2].clamp(-1, 1)
-        tilt = torch.acos(z)
-        timeout = (self._time_left <= 0)
-        return torch.logical_or(timeout, tilt > self.cfg.max_base_tilt_rad)
-
-    def _get_dones_observations_rewards(self):
-        return self._get_dones(), self._get_observations(), self._get_rewards()
-
-    # ---------------- helpers ----------------
-
-    def _sample_cmd(self, env_ids):
-        lo, hi = self.cfg.cmd_vx_range
-        self._cmd_vx[env_ids] = lo + (hi - lo) * torch.rand(len(env_ids), device=self.device)
-        tlo, thi = self.cfg.cmd_resample_min_s, self.cfg.cmd_resample_max_s
-        self._resample_timer[env_ids] = tlo + (thi - tlo) * torch.rand(len(env_ids), device=self.device)
