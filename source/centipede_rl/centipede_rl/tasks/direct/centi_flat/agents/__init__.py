@@ -9,7 +9,7 @@ CENTIPEDE_USD = str(USD_DIR / "new_robot_full_v3.usd")
 
 @dataclass
 class CentipedeCfg(ArticulationCfg):
-    prim_path: str = "/World/envs/env_0/new_robot_full_v3"
+    prim_path: str = "/World/envs/env.*/new_robot_full_v3"
 
     spawn: sim_utils.UsdFileCfg = field(
         default_factory=lambda: sim_utils.UsdFileCfg(
@@ -19,5 +19,5 @@ class CentipedeCfg(ArticulationCfg):
         )
     )
 
-    # articulation_root_prim_path: str | None = "new_robot_full_v3"  # relative to prim_path
+    articulation_root_prim_path: str | None = "/swing_base1/swing_base1"
     actuators: tuple = field(default_factory=tuple)

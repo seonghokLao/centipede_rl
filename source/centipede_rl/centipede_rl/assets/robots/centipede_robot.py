@@ -31,7 +31,7 @@ CENTI_FLAT_ROBOT_CFG = ArticulationCfg(
             stabilization_threshold=1e-3,
         ),
     ),
-    articulation_root_prim_path="swing_base1/swing_base1",
+    articulation_root_prim_path="/swing_base1/swing_base1",
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(0.0, 0.0, 0.6),
         rot=(1.0, 0.0, 0.0, 0.0),

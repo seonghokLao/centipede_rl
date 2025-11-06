@@ -33,7 +33,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 CENTI_FLAT_ROBOT_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path= "./source/centipede_rl/centipede_rl/assets/usd/new_robot_full_v3.usd",
+        usd_path= "./source/centipede_rl/centipede_rl/assets/ten_leg/new_robot_full_v3.usd",
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             rigid_body_enabled=True,
             max_linear_velocity=1000.0,

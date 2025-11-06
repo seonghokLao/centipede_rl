@@ -40,7 +40,7 @@ command_lock = threading.Lock()
 # --- OLEG_CONFIG: Custom robot configuration ---
 OLEG_CONFIG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path="source/centipede_rl/centipede_rl/assets/usd/O_leg.usd",
+        usd_path="source/centipede_rl/centipede_rl/assets/O_leg/O_leg.usd",
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             max_depenetration_velocity=5.0,
@@ -252,7 +252,7 @@ class NewRobotsSceneCfg(InteractiveSceneCfg):
     obstacle = AssetBaseCfg(
         prim_path="/World/obstacle", 
         spawn=sim_utils.UsdFileCfg(
-        usd_path="source/centipede_rl/centipede_rl/assets/usd/maze_v1.usd",
+        usd_path="source/centipede_rl/centipede_rl/assets/O_leg/maze_v1.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
                 max_depenetration_velocity=5.0,
