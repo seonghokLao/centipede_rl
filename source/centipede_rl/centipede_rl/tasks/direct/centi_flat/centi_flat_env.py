@@ -69,19 +69,11 @@ class CentiFlatEnv(DirectRLEnv):
         # self._leg_joint_ids  = self.robot.find_joints(self.cfg.leg_joint_names)[0]
 
         # -- Robot handles
-        self.robot = None
         self.leg_act_joint_ids   = self.robot.find_joints(self.cfg.leg_act_joint_names)[0]
         self.leg_pitch_joint_ids = self.robot.find_joints(self.cfg.leg_pitch_joint_names)[0]
         self.spine_joint_ids     = self.robot.find_joints(self.cfg.spine_joint_names)[0]
         self.vertical_joint_ids  = self.robot.find_joints(self.cfg.vertical_joint_names)[0]
 
-        
-
-        # -- Task buffers
-        self.params = None            # [env, 4]: wave_num, body_amp, leg_amp, v_amp
-        self.target_vel = None        # [env]
-        self.prev_actions = None      # [env, 4]
-        self.time_s = None            # [env] simulated time per env
 
     # ----- Scene -----
     def _setup_scene(self):
@@ -124,6 +116,7 @@ class CentiFlatEnv(DirectRLEnv):
         # Scale and send efforts to a chosen DOF set (edit for your actuators)
         # self.robot.set_joint_effort_target(self.actions * self.cfg.action_scale, joint_ids=self._cart_dof_idx)
         scales = torch.tensor(self.cfg.action_scales, device=self.device)
+        # print(self.params.shape)
         self.params = self.params + self.actions * scales
         lo = torch.tensor([self.cfg.wave_num_range[0], self.cfg.body_amp_range[0],
                         self.cfg.leg_amp_range[0],  self.cfg.v_amp_range[0]], device=self.device)
@@ -136,16 +129,18 @@ class CentiFlatEnv(DirectRLEnv):
         body_amp = self.params[:, 1]
         leg_amp  = self.params[:, 2]
         v_amp    = self.params[:, 3]
-        alpha_bias = torch.zeros_like(wave_num)  # fixed 0.0 (you can expose later)
 
         # MuJoCo constants mirrored
         N = 5
         xis = 1.0 - wave_num / 5.0
         lfs = xis
         dutyf = 0.5
+        print(xis.shape)
+
 
         # Precompute bases per env: shape_basis* are [E, N]
         idx = torch.arange(0, N - 1e-6, 1.0, device=self.device)  # 0..4
+        print(idx.shape)
         # use xi spacing to mimic np.arange(0, xis*(N-1), xis) * 2π  → exactly N samples
         phase_idx = (idx / (N - 1)) * (N - 1) * xis  # ensures N points
         sb1 = torch.sin(phase_idx * 2.0 * math.pi).unsqueeze(0).expand(self.scene.num_envs, -1)
@@ -156,17 +151,13 @@ class CentiFlatEnv(DirectRLEnv):
         # We'll adopt "init_time" = 1s; clamp at 0 before that.
         t = torch.zeros_like(wave_num)
         over = self.time_s > 1.0
-        t[over] = 2.0 * (self.time_s[over] - 1.0 + (math.pi / 2.0) * (alpha_bias[over] < 0.0))
+        t[over] = 2.0 * (self.time_s[over] - 1.0 + (math.pi / 2.0))
 
         # CPG fields
         F1 = _get_F_tw1(t, body_amp)          # [E]
         F2 = _get_F_tw2(t, body_amp)          # [E]
         alpha_array = _alpha(F1, sb1, F2, sb2)  # [E, N]
         # in your code: + [alpha_bias, alpha_bias, 0, 0]  (length 4). We’ll replicate that:
-        if N >= 4:
-            alpha_array[:, 0] += alpha_bias
-            alpha_array[:, 1] += alpha_bias
-            # alpha_array[:, 2] += 0; alpha_array[:, 3] += 0
 
         vertical_alpha = _alpha_v(t, v_amp, xis=xis, N=N, shape_tile=0.0)  # [E,N]
         phase_max = lfs * math.pi + math.pi / 2.0
@@ -284,6 +275,7 @@ class CentiFlatEnv(DirectRLEnv):
             None,
             env_ids,
         )
+        print(env_ids)
 
         # Sample new target velocity per env
         self.target_vel[env_ids] = sample_uniform(

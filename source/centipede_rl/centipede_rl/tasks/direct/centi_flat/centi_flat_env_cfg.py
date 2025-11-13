@@ -61,12 +61,10 @@ class CentiFlatEnvCfg(DirectRLEnvCfg):
     spine_joint_names     = [
         "body_h1", "body_h2",
         "body_h3", "body_h4",
-        "body_h5"
     ]
     vertical_joint_names  = [
         "body_v1", "body_v2",
         "body_v3", "body_v4",
-        "body_v5"
     ]
 
     # Parameter limits for clamping

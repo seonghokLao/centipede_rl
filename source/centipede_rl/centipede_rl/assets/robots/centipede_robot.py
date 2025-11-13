@@ -15,7 +15,7 @@ from isaaclab.actuators import ImplicitActuatorCfg
 # and set this path accordingly. During training, absolute paths are simplest.
 CENTI_FLAT_ROBOT_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path= "./source/centipede_rl/centipede_rl/assets/usd/new_robot_full_v3.usd",
+        usd_path= "./source/centipede_rl/centipede_rl/assets/ten_leg/new_robot_full_v3.usd",
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             rigid_body_enabled=True,
             max_linear_velocity=1000.0,
@@ -70,13 +70,13 @@ CENTI_FLAT_ROBOT_CFG = ArticulationCfg(
             stiffness=10,
             damping=0.2,
         ),
-        "h5": ImplicitActuatorCfg(
-            joint_names_expr=["body_h5"],
-            effort_limit_sim=1.5,
-            velocity_limit_sim=100.0,
-            stiffness=10,
-            damping=0.2,
-        ),
+        # "h5": ImplicitActuatorCfg(
+        #     joint_names_expr=["body_h5"],
+        #     effort_limit_sim=1.5,
+        #     velocity_limit_sim=100.0,
+        #     stiffness=10,
+        #     damping=0.2,
+        # ),
         # Vertical (alpha_v)
         "v1": ImplicitActuatorCfg(
             joint_names_expr=["body_v1"],
@@ -106,13 +106,13 @@ CENTI_FLAT_ROBOT_CFG = ArticulationCfg(
             stiffness=10,
             damping=0.2,
         ),
-        "v5": ImplicitActuatorCfg(
-            joint_names_expr=["body_v5"],
-            effort_limit_sim=1.5,
-            velocity_limit_sim=100.0,
-            stiffness=10,
-            damping=0.2,
-        ),
+        # "v5": ImplicitActuatorCfg(
+        #     joint_names_expr=["body_v5"],
+        #     effort_limit_sim=1.5,
+        #     velocity_limit_sim=100.0,
+        #     stiffness=10,
+        #     damping=0.2,
+        # ),
         # Leg pitch L/R (beta)
         "l1": ImplicitActuatorCfg(
             joint_names_expr=["l_leg_joint1"],
