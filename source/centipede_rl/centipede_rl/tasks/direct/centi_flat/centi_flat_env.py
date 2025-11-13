@@ -27,36 +27,68 @@ def _alpha(F_tw1, shape_basis1, F_tw2, shape_basis2):
     # shape_basis*: [N] → broadcast over envs
     return F_tw1.unsqueeze(1) * shape_basis1 + F_tw2.unsqueeze(1) * shape_basis2
 
-def _alpha_v(t, v_amp, xis, N, shape_tile=0.0):
-    # result: [E, N]
-    x_vals = (torch.arange(0, xis * (N - 1), xis, device=t.device) * 2.0 * math.pi) + shape_tile + t.unsqueeze(1)
-    return v_amp.unsqueeze(1) * torch.cos(2.0 * x_vals + math.pi / 2.0)
-
 def _F_Leg(Aleg, time, dutyf):
-    # piecewise cosine at duty factor; Aleg: [E], time: [E] or [E,N]
+    """Piecewise cosine with duty factor.
+    Aleg: [E]
+    time: [E] or [E, N]
+    returns same shape as time.
+    """
+    two_pi = 2.0 * math.pi
+    time_mod = torch.remainder(time, two_pi)          # same shape as time
+    on = time_mod < (two_pi * dutyf)                  # bool mask, same shape
+
+    # Broadcast Aleg over trailing dimensions
+    # if time is [E]  -> Aleg_exp [E]
+    # if time is [E,N]-> Aleg_exp [E,1]
+    Aleg_exp = Aleg.view(-1, *([1] * (time_mod.ndim - 1)))
+
+    cos_on  = torch.cos(time_mod / (2.0 * dutyf))
+    cos_off = torch.cos((time_mod - two_pi) / (2.0 * (1.0 - dutyf)))
+
+    out_on  = Aleg_exp * cos_on
+    out_off = Aleg_exp * cos_off
+
+    return torch.where(on, out_on, out_off)
+
+
+def _F_leg_act(time, dutyf):
+    """Leg contact "activation": 2 during stance, 0 during swing.
+    time: [E] or [E,N]
+    returns same shape as time.
+    """
     two_pi = 2.0 * math.pi
     time_mod = torch.remainder(time, two_pi)
     on = time_mod < (two_pi * dutyf)
-    out = torch.zeros_like(time_mod)
-    out[on]  = Aleg.unsqueeze(-1 if time_mod.ndim==2 else 0)[..., None if time_mod.ndim==2 else ...] * torch.cos(time_mod[on]  / (2.0 * dutyf))
-    out[~on] = Aleg.unsqueeze(-1 if time_mod.ndim==2 else 0)[..., None if time_mod.ndim==2 else ...] * torch.cos((time_mod[~on] - two_pi) / (2.0 * (1.0 - dutyf)))
-    return out
+    return on.to(time.dtype) * 2.0  # 2 or 0
 
-def _F_leg_act(time, dutyf):
-    two_pi = 2.0 * math.pi
-    time_mod = torch.remainder(time, two_pi)
-    return (time_mod < (two_pi * dutyf)).to(time.dtype) * 2.0  # 2 or 0
 
 def _get_beta(phi, num_leg, Aleg, dutyf, lfs):
-    # beta: [E, num_leg]
-    idx = torch.arange(1, num_leg + 1, device=phi.device, dtype=phi.dtype)
-    times = phi.unsqueeze(1) + (idx - 1.0) * lfs * 2.0 * math.pi
-    return -_F_Leg(Aleg, times, dutyf)
+    """beta: [E, num_leg] (leg pitch offsets)."""
+    # idx: 0..num_leg-1
+    idx = torch.arange(num_leg, device=phi.device, dtype=phi.dtype)  # [N]
+    # phi: [E], lfs: [E]
+    # times: [E, N]
+    times = phi.unsqueeze(1) + idx.unsqueeze(0) * lfs.unsqueeze(1) * 2.0 * math.pi
+    return -_F_Leg(Aleg, times, dutyf)  # [E, N]
+
 
 def _get_act(phi, lfs, num_leg, dutyf):
-    idx = torch.arange(0, num_leg, device=phi.device, dtype=phi.dtype)
-    times = phi.unsqueeze(1) + (idx - 1.0) * lfs * 2.0 * math.pi
-    return _F_leg_act(times, dutyf)  # [E, num_leg] values in {0,2}
+    """Leg "contact" activations, one per body segment: [E, num_leg]."""
+    idx = torch.arange(num_leg, device=phi.device, dtype=phi.dtype)  # [N]
+    times = phi.unsqueeze(1) + idx.unsqueeze(0) * lfs.unsqueeze(1) * 2.0 * math.pi
+    return _F_leg_act(times, dutyf)  # [E, N]
+
+
+def _alpha_v(t, v_amp, xis, N, shape_tile=0.0):
+    """Vertical spine wave: result [E, N]."""
+    # t: [E], v_amp: [E], xis: [E]
+    E = t.shape[0]
+    idx = torch.arange(N, device=t.device, dtype=t.dtype)  # [N]
+    # grid of phase positions per env: [E, N]
+    x_vals = idx.unsqueeze(0) * xis.unsqueeze(1) * 2.0 * math.pi
+    x_vals = x_vals + shape_tile + t.unsqueeze(1)
+    return v_amp.unsqueeze(1) * torch.cos(2.0 * x_vals + math.pi / 2.0)  # [E, N]
+
 
 
 class CentiFlatEnv(DirectRLEnv):
@@ -113,96 +145,99 @@ class CentiFlatEnv(DirectRLEnv):
     
 
     def _apply_action(self) -> None:
-        # Scale and send efforts to a chosen DOF set (edit for your actuators)
-        # self.robot.set_joint_effort_target(self.actions * self.cfg.action_scale, joint_ids=self._cart_dof_idx)
+        # Update params from actions
         scales = torch.tensor(self.cfg.action_scales, device=self.device)
-        # print(self.params.shape)
         self.params = self.params + self.actions * scales
-        lo = torch.tensor([self.cfg.wave_num_range[0], self.cfg.body_amp_range[0],
-                        self.cfg.leg_amp_range[0],  self.cfg.v_amp_range[0]], device=self.device)
-        hi = torch.tensor([self.cfg.wave_num_range[1], self.cfg.body_amp_range[1],
-                        self.cfg.leg_amp_range[1],  self.cfg.v_amp_range[1]], device=self.device)
+
+        lo = torch.tensor(
+            [self.cfg.wave_num_range[0], self.cfg.body_amp_range[0],
+            self.cfg.leg_amp_range[0],  self.cfg.v_amp_range[0]],
+            device=self.device,
+        )
+        hi = torch.tensor(
+            [self.cfg.wave_num_range[1], self.cfg.body_amp_range[1],
+            self.cfg.leg_amp_range[1],  self.cfg.v_amp_range[1]],
+            device=self.device,
+        )
         self.params = torch.max(torch.min(self.params, hi), lo)
 
         # unpack
-        wave_num = self.params[:, 0]
-        body_amp = self.params[:, 1]
-        leg_amp  = self.params[:, 2]
-        v_amp    = self.params[:, 3]
+        wave_num = self.params[:, 0]  # [E]
+        body_amp = self.params[:, 1]  # [E]
+        leg_amp  = self.params[:, 2]  # [E]
+        v_amp    = self.params[:, 3]  # [E]
 
         # MuJoCo constants mirrored
         N = 5
-        xis = 1.0 - wave_num / 5.0
-        lfs = xis
+        E = self.scene.num_envs
+        xis = 1.0 - wave_num / 5.0    # [E]
+        lfs = xis                      # [E]
         dutyf = 0.5
-        print(xis.shape)
 
+        # ---------- Shape bases per env: sb1, sb2 : [E, N] ----------
+        idx = torch.arange(N, device=self.device, dtype=self.params.dtype)  # [N]
+        # phase_idx: [E, N]
+        phase_idx = idx.unsqueeze(0) * xis.unsqueeze(1)
+        sb1 = torch.sin(phase_idx * 2.0 * math.pi)  # [E, N]
+        sb2 = torch.cos(phase_idx * 2.0 * math.pi)  # [E, N]
 
-        # Precompute bases per env: shape_basis* are [E, N]
-        idx = torch.arange(0, N - 1e-6, 1.0, device=self.device)  # 0..4
-        print(idx.shape)
-        # use xi spacing to mimic np.arange(0, xis*(N-1), xis) * 2π  → exactly N samples
-        phase_idx = (idx / (N - 1)) * (N - 1) * xis  # ensures N points
-        sb1 = torch.sin(phase_idx * 2.0 * math.pi).unsqueeze(0).expand(self.scene.num_envs, -1)
-        sb2 = torch.cos(phase_idx * 2.0 * math.pi).unsqueeze(0).expand(self.scene.num_envs, -1)
-
-        # time (with MuJoCo offset logic)
-        # t = 2*(time - init_time + π/2 * (alpha_bias<0)) if time > init_time else 0
-        # We'll adopt "init_time" = 1s; clamp at 0 before that.
-        t = torch.zeros_like(wave_num)
+        # ---------- Time (MuJoCo-style offset) ----------
+        # t = 0 before 1 s; afterwards, shifted & scaled
+        t = torch.zeros_like(wave_num)  # [E]
         over = self.time_s > 1.0
         t[over] = 2.0 * (self.time_s[over] - 1.0 + (math.pi / 2.0))
 
-        # CPG fields
+        # ---------- CPG / shape fields ----------
         F1 = _get_F_tw1(t, body_amp)          # [E]
         F2 = _get_F_tw2(t, body_amp)          # [E]
-        alpha_array = _alpha(F1, sb1, F2, sb2)  # [E, N]
-        # in your code: + [alpha_bias, alpha_bias, 0, 0]  (length 4). We’ll replicate that:
+        alpha_array = _alpha(F1, sb1, F2, sb2)  # [E, N] (spine lateral)
 
-        vertical_alpha = _alpha_v(t, v_amp, xis=xis, N=N, shape_tile=0.0)  # [E,N]
-        phase_max = lfs * math.pi + math.pi / 2.0
-        phi = torch.atan2(F2, F1) - phase_max   # [E]
+        vertical_alpha = _alpha_v(t, v_amp, xis=xis, N=N, shape_tile=0.0)  # [E, N]
 
-        act_array = _get_act(phi, lfs, N, dutyf) - 1.0  # [E,N], values {+1,-1}
-        # expand to 10 per sim_env: [E,2N] with duplicated values and scale to ±0.4
-        act_array_new = torch.zeros((self.scene.num_envs, 2 * N), device=self.device)
-        val = torch.where(act_array > 0, torch.full_like(act_array, 0.4), torch.full_like(act_array, -0.4))
-        act_array_new[:, :N] = val
-        act_array_new[:, N: ] = val
+        phase_max = lfs * math.pi + math.pi / 2.0  # [E]
+        phi = torch.atan2(F2, F1) - phase_max      # [E]
 
-        beta_array = _get_beta(phi, N, leg_amp, dutyf, lfs)  # [E,N]
+        # Leg contact activations: [E, N] in {0, 2}
+        act_array = _get_act(phi, lfs, N, dutyf)  # [E, N]
+        # Convert to ±0.4 and duplicate for L/R legs → [E, 2N]
+        act_vals = torch.where(
+            act_array > 0,
+            torch.full_like(act_array, 0.4),
+            torch.full_like(act_array, -0.4),
+        )  # [E, N]
+        act_vals_LR = torch.stack([act_vals, act_vals], dim=2).reshape(E, 2 * N)  # [E, 2N]
 
-        # zero during "init_time"
+        # Leg pitch offsets beta: [E, N], duplicate for L/R → [E, 2N]
+        beta_array = _get_beta(phi, N, leg_amp, dutyf, lfs)  # [E, N]
+        beta_LR = torch.stack([beta_array, beta_array], dim=2).reshape(E, 2 * N)  # [E, 2N]
+
+        # Zero everything during "init_time"
         under = self.time_s < 1.0
         if under.any():
             alpha_array[under] *= 0.0
             vertical_alpha[under] *= 0.0
-            beta_array[under] *= 0.0
+            beta_LR[under] *= 0.0
+            act_vals_LR[under] *= 0.0
 
-        # 2) Map to Isaac joints:  [act(10)] + [beta(5)] + [alpha(5)] + [vertical(5)]
-        # Position targets (or switch to torque if needed)
-        act_vals = torch.where(act_array > 0, torch.full_like(act_array, 0.4),
-                                      torch.full_like(act_array, -0.4))   # [E, N]
-
-        # beta_array: [E, N] → duplicate for L/R to match 2N leg_pitch joints
-        beta_LR = torch.stack([beta_array, beta_array], dim=2).reshape(beta_array.size(0), -1)  # [E, 2N]
-        # or interleave explicitly to align with ["l_leg_joint1","r_leg_joint1", ...]
-        # beta_LR = torch.stack([beta_array, beta_array], dim=2).flatten(1)
-
-        # alpha_array: [E, N]  (spine)
-        # vertical_alpha: [E, N]  (vertical)
-
-        # Concatenate in the same order as IDs:
-        q_targets = torch.cat([act_vals, beta_LR, alpha_array, vertical_alpha], dim=1)  # [E, N + 2N + N + N] = [E, 5N]
+        # ---------- Concatenate in joint order ----------
+        # Expected order: [act(2N)] + [beta(2N)] + [alpha(N)] + [vertical(N)]
+        q_targets = torch.cat(
+            [act_vals_LR, beta_LR, alpha_array, vertical_alpha],
+            dim=1,   # [E, 2N + 2N + N + N] = [E, 6N]
+        )
 
         ids_all = torch.cat([
-            self.leg_act_joint_ids,        # N
-            self.leg_pitch_joint_ids,      # 2N (L1,R1,L2,R2,...)
-            self.spine_joint_ids,          # N
-            self.vertical_joint_ids,       # N
+            self.leg_act_joint_ids,   # length 2N
+            self.leg_pitch_joint_ids, # length 2N
+            self.spine_joint_ids,     # length N
+            self.vertical_joint_ids,  # length N
         ])
 
+        # Sanity check (optional):
+        # assert q_targets.shape[1] == ids_all.numel(), "Mismatch between q_targets and joint IDs!"
+
         self.robot.set_joint_position_target(q_targets, joint_ids=ids_all)
+
 
     def _get_observations(self) -> dict:
         # Build observation vector (edit to match your task)
@@ -227,15 +262,11 @@ class CentiFlatEnv(DirectRLEnv):
         vx = self.robot.data.root_lin_vel_w[:, 0]
         vel_err = torch.abs(vx - self.target_vel)
 
-        # Smoothness & effort
         smooth = torch.norm(self.actions - self.prev_actions, dim=1)
-        qdot = torch.norm(self.robot.data.joint_vel[:, torch.cat([self._body_joint_ids, self._leg_joint_ids])], dim=1)
+        # use all joint velocities:
+        qdot = torch.norm(self.robot.data.joint_vel, dim=1)
 
-        # Base flatness (penalize roll/pitch away from 0)
-        # extract approximate roll/pitch from quaternion if desired
-        # quick small-angle approx from world Z axis tilt:
-        # (optional) use quat->euler if you have util; here we keep it simple:
-        flat_penalty = 0.0  # set >0 if you add proper roll/pitch calc
+        flat_penalty = 0.0
 
         rew = (
             self.cfg.rew_w_alive
