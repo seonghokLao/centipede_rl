@@ -16,79 +16,59 @@ from isaaclab.utils.math import sample_uniform
 
 from .centi_flat_env_cfg import CentiFlatEnvCfg
 
-def _get_F_tw1(t, body_amp):  # t: [E], body_amp: [E]
+def _get_F_tw1(t, body_amp):
     return body_amp * torch.cos(t)
+
 
 def _get_F_tw2(t, body_amp):
     return body_amp * torch.sin(t)
 
+
 def _alpha(F_tw1, shape_basis1, F_tw2, shape_basis2):
-    # F_tw1 * sin(basis) + F_tw2 * cos(basis)
-    # shape_basis*: [N] → broadcast over envs
     return F_tw1.unsqueeze(1) * shape_basis1 + F_tw2.unsqueeze(1) * shape_basis2
 
+
 def _F_Leg(Aleg, time, dutyf):
-    """Piecewise cosine with duty factor.
-    Aleg: [E]
-    time: [E] or [E, N]
-    returns same shape as time.
-    """
     two_pi = 2.0 * math.pi
-    time_mod = torch.remainder(time, two_pi)          # same shape as time
-    on = time_mod < (two_pi * dutyf)                  # bool mask, same shape
-
-    # Broadcast Aleg over trailing dimensions
-    # if time is [E]  -> Aleg_exp [E]
-    # if time is [E,N]-> Aleg_exp [E,1]
+    time_mod = torch.remainder(time, two_pi)
+    on = time_mod < (two_pi * dutyf)
+    
     Aleg_exp = Aleg.view(-1, *([1] * (time_mod.ndim - 1)))
-
-    cos_on  = torch.cos(time_mod / (2.0 * dutyf))
+    
+    cos_on = torch.cos(time_mod / (2.0 * dutyf))
     cos_off = torch.cos((time_mod - two_pi) / (2.0 * (1.0 - dutyf)))
-
-    out_on  = Aleg_exp * cos_on
+    
+    out_on = Aleg_exp * cos_on
     out_off = Aleg_exp * cos_off
-
+    
     return torch.where(on, out_on, out_off)
 
 
 def _F_leg_act(time, dutyf):
-    """Leg contact "activation": 2 during stance, 0 during swing.
-    time: [E] or [E,N]
-    returns same shape as time.
-    """
     two_pi = 2.0 * math.pi
     time_mod = torch.remainder(time, two_pi)
     on = time_mod < (two_pi * dutyf)
-    return on.to(time.dtype) * 2.0  # 2 or 0
+    return on.to(time.dtype) * 2.0
 
 
 def _get_beta(phi, num_leg, Aleg, dutyf, lfs):
-    """beta: [E, num_leg] (leg pitch offsets)."""
-    # idx: 0..num_leg-1
-    idx = torch.arange(num_leg, device=phi.device, dtype=phi.dtype)  # [N]
-    # phi: [E], lfs: [E]
-    # times: [E, N]
+    idx = torch.arange(num_leg, device=phi.device, dtype=phi.dtype)
     times = phi.unsqueeze(1) + idx.unsqueeze(0) * lfs.unsqueeze(1) * 2.0 * math.pi
-    return -_F_Leg(Aleg, times, dutyf)  # [E, N]
+    return -_F_Leg(Aleg, times, dutyf)
 
 
 def _get_act(phi, lfs, num_leg, dutyf):
-    """Leg "contact" activations, one per body segment: [E, num_leg]."""
-    idx = torch.arange(num_leg, device=phi.device, dtype=phi.dtype)  # [N]
+    idx = torch.arange(num_leg, device=phi.device, dtype=phi.dtype)
     times = phi.unsqueeze(1) + idx.unsqueeze(0) * lfs.unsqueeze(1) * 2.0 * math.pi
-    return _F_leg_act(times, dutyf)  # [E, N]
+    return _F_leg_act(times, dutyf)
 
 
 def _alpha_v(t, v_amp, xis, N, shape_tile=0.0):
-    """Vertical spine wave: result [E, N]."""
-    # t: [E], v_amp: [E], xis: [E]
     E = t.shape[0]
-    idx = torch.arange(N, device=t.device, dtype=t.dtype)  # [N]
-    # grid of phase positions per env: [E, N]
+    idx = torch.arange(N-1, device=t.device, dtype=t.dtype)
     x_vals = idx.unsqueeze(0) * xis.unsqueeze(1) * 2.0 * math.pi
     x_vals = x_vals + shape_tile + t.unsqueeze(1)
-    return v_amp.unsqueeze(1) * torch.cos(2.0 * x_vals + math.pi / 2.0)  # [E, N]
-
+    return v_amp.unsqueeze(1) * torch.cos(2.0 * x_vals + math.pi / 2.0)
 
 
 class CentiFlatEnv(DirectRLEnv):
@@ -101,10 +81,26 @@ class CentiFlatEnv(DirectRLEnv):
         # self._leg_joint_ids  = self.robot.find_joints(self.cfg.leg_joint_names)[0]
 
         # -- Robot handles
-        self.leg_act_joint_ids   = self.robot.find_joints(self.cfg.leg_act_joint_names)[0]
-        self.leg_pitch_joint_ids = self.robot.find_joints(self.cfg.leg_pitch_joint_names)[0]
-        self.spine_joint_ids     = self.robot.find_joints(self.cfg.spine_joint_names)[0]
-        self.vertical_joint_ids  = self.robot.find_joints(self.cfg.vertical_joint_names)[0]
+        # self.leg_act_joint_ids   = self.robot.find_joints(self.cfg.leg_act_joint_names)[0]
+        # self.leg_pitch_joint_ids = self.robot.find_joints(self.cfg.leg_pitch_joint_names)[0]
+        # self.spine_joint_ids     = self.robot.find_joints(self.cfg.spine_joint_names)[0]
+        # self.vertical_joint_ids  = self.robot.find_joints(self.cfg.vertical_joint_names)[0]
+        self.leg_act_joint_ids = torch.tensor(
+            self.robot.find_joints(self.cfg.leg_act_joint_names)[0], 
+            device=self.device, dtype=torch.long
+        )
+        self.leg_pitch_joint_ids = torch.tensor(
+            self.robot.find_joints(self.cfg.leg_pitch_joint_names)[0],
+            device=self.device, dtype=torch.long
+        )
+        self.spine_joint_ids = torch.tensor(
+            self.robot.find_joints(self.cfg.spine_joint_names)[0],
+            device=self.device, dtype=torch.long
+        )
+        self.vertical_joint_ids = torch.tensor(
+            self.robot.find_joints(self.cfg.vertical_joint_names)[0],
+            device=self.device, dtype=torch.long
+        )
 
 
     # ----- Scene -----
@@ -145,73 +141,68 @@ class CentiFlatEnv(DirectRLEnv):
     
 
     def _apply_action(self) -> None:
-        # Update params from actions
+        # Scale and send efforts to a chosen DOF set (edit for your actuators)
+        # self.robot.set_joint_effort_target(self.actions * self.cfg.action_scale, joint_ids=self._cart_dof_idx)
+        self.time_s += self.physics_dt * self.cfg.decimation
         scales = torch.tensor(self.cfg.action_scales, device=self.device)
+        # print(self.params.shape)
         self.params = self.params + self.actions * scales
-
-        lo = torch.tensor(
-            [self.cfg.wave_num_range[0], self.cfg.body_amp_range[0],
-            self.cfg.leg_amp_range[0],  self.cfg.v_amp_range[0]],
-            device=self.device,
-        )
-        hi = torch.tensor(
-            [self.cfg.wave_num_range[1], self.cfg.body_amp_range[1],
-            self.cfg.leg_amp_range[1],  self.cfg.v_amp_range[1]],
-            device=self.device,
-        )
+        lo = torch.tensor([self.cfg.wave_num_range[0], self.cfg.body_amp_range[0],
+                        self.cfg.leg_amp_range[0],  self.cfg.v_amp_range[0]], device=self.device)
+        hi = torch.tensor([self.cfg.wave_num_range[1], self.cfg.body_amp_range[1],
+                        self.cfg.leg_amp_range[1],  self.cfg.v_amp_range[1]], device=self.device)
         self.params = torch.max(torch.min(self.params, hi), lo)
 
         # unpack
-        wave_num = self.params[:, 0]  # [E]
-        body_amp = self.params[:, 1]  # [E]
-        leg_amp  = self.params[:, 2]  # [E]
-        v_amp    = self.params[:, 3]  # [E]
+        wave_num = self.params[:, 0]
+        body_amp = self.params[:, 1]
+        leg_amp  = self.params[:, 2]
+        v_amp    = self.params[:, 3]
 
         # MuJoCo constants mirrored
         N = 5
+        num_legs = 5  # Number of legs
         E = self.scene.num_envs
-        xis = 1.0 - wave_num / 5.0    # [E]
-        lfs = xis                      # [E]
+        xis = 1.0 - wave_num / 5.0
+        lfs = xis
         dutyf = 0.5
 
-        # ---------- Shape bases per env: sb1, sb2 : [E, N] ----------
-        idx = torch.arange(N, device=self.device, dtype=self.params.dtype)  # [N]
-        # phase_idx: [E, N]
-        phase_idx = idx.unsqueeze(0) * xis.unsqueeze(1)
+
+        # Precompute bases per env: shape_basis* are [E, N]
+        idx = torch.arange(N-1, device=self.device, dtype=self.params.dtype)  # [N]
+        phase_idx = idx.unsqueeze(0) * xis.unsqueeze(1)  # [E, N]
         sb1 = torch.sin(phase_idx * 2.0 * math.pi)  # [E, N]
         sb2 = torch.cos(phase_idx * 2.0 * math.pi)  # [E, N]
 
-        # ---------- Time (MuJoCo-style offset) ----------
-        # t = 0 before 1 s; afterwards, shifted & scaled
-        t = torch.zeros_like(wave_num)  # [E]
+        t = torch.zeros_like(wave_num)
         over = self.time_s > 1.0
         t[over] = 2.0 * (self.time_s[over] - 1.0 + (math.pi / 2.0))
 
-        # ---------- CPG / shape fields ----------
-        F1 = _get_F_tw1(t, body_amp)          # [E]
-        F2 = _get_F_tw2(t, body_amp)          # [E]
-        alpha_array = _alpha(F1, sb1, F2, sb2)  # [E, N] (spine lateral)
-
-        vertical_alpha = _alpha_v(t, v_amp, xis=xis, N=N, shape_tile=0.0)  # [E, N]
+        # CPG / shape fields
+        F1 = _get_F_tw1(t, body_amp)  # [E]
+        F2 = _get_F_tw2(t, body_amp)  # [E]
+        alpha_array = _alpha(F1, sb1, F2, sb2)  # [E, N=4]
+        vertical_alpha = _alpha_v(t, v_amp, xis=xis, N=N, shape_tile=0.0)  # [E, N=4]
 
         phase_max = lfs * math.pi + math.pi / 2.0  # [E]
-        phi = torch.atan2(F2, F1) - phase_max      # [E]
+        phi = torch.atan2(F2, F1) - phase_max  # [E]
 
-        # Leg contact activations: [E, N] in {0, 2}
-        act_array = _get_act(phi, lfs, N, dutyf)  # [E, N]
-        # Convert to ±0.4 and duplicate for L/R legs → [E, 2N]
+        # Leg contact activations: [E, num_legs]
+        act_array = _get_act(phi, lfs, num_legs, dutyf)  # [E, 5]
         act_vals = torch.where(
             act_array > 0,
             torch.full_like(act_array, 0.4),
             torch.full_like(act_array, -0.4),
-        )  # [E, N]
-        act_vals_LR = torch.stack([act_vals, act_vals], dim=2).reshape(E, 2 * N)  # [E, 2N]
+        )  # [E, 5]
+        # Duplicate for L/R: [E, 5] -> [E, 5, 2] -> [E, 10]
+        act_vals_LR = act_vals.unsqueeze(2).repeat(1, 1, 2).reshape(E, 2 * num_legs)
 
-        # Leg pitch offsets beta: [E, N], duplicate for L/R → [E, 2N]
-        beta_array = _get_beta(phi, N, leg_amp, dutyf, lfs)  # [E, N]
-        beta_LR = torch.stack([beta_array, beta_array], dim=2).reshape(E, 2 * N)  # [E, 2N]
+        # Leg pitch offsets: [E, num_legs]
+        beta_array = _get_beta(phi, num_legs, leg_amp, dutyf, lfs)  # [E, 5]
+        # Duplicate for L/R: [E, 5] -> [E, 5, 2] -> [E, 10]
+        beta_LR = beta_array.unsqueeze(2).repeat(1, 1, 2).reshape(E, 2 * num_legs)
 
-        # Zero everything during "init_time"
+        # Zero during initialization
         under = self.time_s < 1.0
         if under.any():
             alpha_array[under] *= 0.0
@@ -219,22 +210,25 @@ class CentiFlatEnv(DirectRLEnv):
             beta_LR[under] *= 0.0
             act_vals_LR[under] *= 0.0
 
-        # ---------- Concatenate in joint order ----------
-        # Expected order: [act(2N)] + [beta(2N)] + [alpha(N)] + [vertical(N)]
+        # Concatenate joint targets in correct order
+        # Expected: [leg_swing(5)] + [leg_pitch_L/R(10)] + [spine_h(4)] + [spine_v(4)]
+        # Total: 5 + 10 + 4 + 4 = 23 joints
         q_targets = torch.cat(
-            [act_vals_LR, beta_LR, alpha_array, vertical_alpha],
-            dim=1,   # [E, 2N + 2N + N + N] = [E, 6N]
-        )
+            [
+                act_vals,          # [E, 5] - leg swing joints (NOT duplicated)
+                beta_LR,           # [E, 10] - leg pitch L/R
+                alpha_array,       # [E, 4] - spine horizontal
+                vertical_alpha     # [E, 4] - spine vertical
+            ],
+            dim=1,
+        )  # [E, 23]
 
         ids_all = torch.cat([
-            self.leg_act_joint_ids,   # length 2N
-            self.leg_pitch_joint_ids, # length 2N
-            self.spine_joint_ids,     # length N
-            self.vertical_joint_ids,  # length N
-        ])
-
-        # Sanity check (optional):
-        # assert q_targets.shape[1] == ids_all.numel(), "Mismatch between q_targets and joint IDs!"
+            self.leg_act_joint_ids,    # 5 joints
+            self.leg_pitch_joint_ids,  # 10 joints
+            self.spine_joint_ids,      # 4 joints
+            self.vertical_joint_ids,   # 4 joints
+        ])  # Total: 23 joints
 
         self.robot.set_joint_position_target(q_targets, joint_ids=ids_all)
 
@@ -263,19 +257,16 @@ class CentiFlatEnv(DirectRLEnv):
         vel_err = torch.abs(vx - self.target_vel)
 
         smooth = torch.norm(self.actions - self.prev_actions, dim=1)
-        # use all joint velocities:
         qdot = torch.norm(self.robot.data.joint_vel, dim=1)
-
-        flat_penalty = 0.0
 
         rew = (
             self.cfg.rew_w_alive
             - self.cfg.rew_w_vel * vel_err
-            + self.cfg.rew_w_flat * (-flat_penalty)
-            + self.cfg.rew_w_smooth * smooth
-            + self.cfg.rew_w_eff * qdot
+            - self.cfg.rew_w_smooth * smooth
+            - self.cfg.rew_w_eff * qdot
         )
-        self.prev_actions = self.actions.detach()
+        
+        self.prev_actions = self.actions.clone()
         return rew
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:

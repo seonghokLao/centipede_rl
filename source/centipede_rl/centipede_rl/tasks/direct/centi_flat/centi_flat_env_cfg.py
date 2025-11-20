@@ -24,8 +24,8 @@ class CentiFlatEnvCfg(DirectRLEnvCfg):
 
     # === Spaces ===
     # Update these to match your robot’s action/obs sizes.
-    action_space = 1
-    observation_space = 4
+    action_space = 4
+    observation_space = 17
     state_space = 0
 
     # === Simulation ===
@@ -75,19 +75,10 @@ class CentiFlatEnvCfg(DirectRLEnvCfg):
 
     # === Task params (edit for your robot) ===
     # Names of controllable joints (example placeholders)
-    cart_dof_name = "slider_to_cart"
-    pole_dof_name = "cart_to_pole"
-
     action_scales = (0.05, 0.05, 0.05, 0.1)
 
     # Desired-velocity sampling
     target_vel_range = (0.0, 1.0)  # [m/s] sample per env at reset
-
-    # Target position-control stiffness/damping for joints
-    kp_body = 20.0
-    kd_body = 2.0
-    kp_leg  = 30.0
-    kd_leg  = 3.0
 
     # Reward weights
     rew_w_alive = 1.0

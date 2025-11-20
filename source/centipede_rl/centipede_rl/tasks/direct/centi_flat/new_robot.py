@@ -88,13 +88,6 @@ CENTI_FLAT_ROBOT_CFG = ArticulationCfg(
             stiffness=10,
             damping=0.2,
         ),
-        "h5": ImplicitActuatorCfg(
-            joint_names_expr=["body_h5"],
-            effort_limit_sim=1.5,
-            velocity_limit_sim=100.0,
-            stiffness=10,
-            damping=0.2,
-        ),
         # Vertical (alpha_v)
         "v1": ImplicitActuatorCfg(
             joint_names_expr=["body_v1"],
@@ -119,13 +112,6 @@ CENTI_FLAT_ROBOT_CFG = ArticulationCfg(
         ),
         "v4": ImplicitActuatorCfg(
             joint_names_expr=["body_v4"],
-            effort_limit_sim=1.5,
-            velocity_limit_sim=100.0,
-            stiffness=10,
-            damping=0.2,
-        ),
-        "v5": ImplicitActuatorCfg(
-            joint_names_expr=["body_v5"],
             effort_limit_sim=1.5,
             velocity_limit_sim=100.0,
             stiffness=10,
@@ -277,11 +263,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 scene["centi"].data.default_joint_vel.clone(),
             )
             scene["centi"].write_joint_state_to_sim(joint_pos, joint_vel)
-            joint_pos, joint_vel = (
-                scene["Dofbot"].data.default_joint_pos.clone(),
-                scene["Dofbot"].data.default_joint_vel.clone(),
-            )
-            scene["Dofbot"].write_joint_state_to_sim(joint_pos, joint_vel)
             # clear internal buffers
             scene.reset()
             print("[INFO]: Resetting centi state...")
