@@ -78,7 +78,7 @@ class CentiFlatEnvCfg(DirectRLEnvCfg):
     action_scales = (0.05, 0.05, 0.05, 0.1)
 
     # Desired-velocity sampling
-    target_vel_range = (0.0, 1.0)  # [m/s] sample per env at reset
+    target_vel_range = (0.0, 0.4)  # [m/s] sample per env at reset
 
     # Reward weights
     rew_w_alive = 1.0

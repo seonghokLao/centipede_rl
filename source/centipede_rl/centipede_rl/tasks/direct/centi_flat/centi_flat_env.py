@@ -13,6 +13,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import sample_uniform
+from isaaclab.utils.math import quat_from_euler_xyz
 
 from .centi_flat_env_cfg import CentiFlatEnvCfg
 
@@ -134,6 +135,9 @@ class CentiFlatEnv(DirectRLEnv):
         self.prev_actions = torch.zeros((n_env, 4), device=self.device)
         self.time_s = torch.zeros(n_env, device=self.device)
 
+        self.vel_sum = torch.zeros(n_env, device=self.device)
+        self.vel_count = torch.zeros(n_env, device=self.device)
+
     # ----- RL plumbing -----
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.actions = actions.clone()
@@ -141,94 +145,95 @@ class CentiFlatEnv(DirectRLEnv):
     
 
     def _apply_action(self) -> None:
-        # Scale and send efforts to a chosen DOF set (edit for your actuators)
-        # self.robot.set_joint_effort_target(self.actions * self.cfg.action_scale, joint_ids=self._cart_dof_idx)
+        """
+        Actions directly set parameters (not incremental changes)
+        This allows policy to pick optimal params for target_vel at episode start
+        """
         self.time_s += self.physics_dt * self.cfg.decimation
-        scales = torch.tensor(self.cfg.action_scales, device=self.device)
-        # print(self.params.shape)
-        self.params = self.params + self.actions * scales
+        
+        # ========================================================================
+        # KEY CHANGE: Actions directly map to parameters (not deltas)
+        # ========================================================================
         lo = torch.tensor([self.cfg.wave_num_range[0], self.cfg.body_amp_range[0],
-                        self.cfg.leg_amp_range[0],  self.cfg.v_amp_range[0]], device=self.device)
+                        self.cfg.leg_amp_range[0],  self.cfg.v_amp_range[0]], 
+                        device=self.device)
         hi = torch.tensor([self.cfg.wave_num_range[1], self.cfg.body_amp_range[1],
-                        self.cfg.leg_amp_range[1],  self.cfg.v_amp_range[1]], device=self.device)
-        self.params = torch.max(torch.min(self.params, hi), lo)
-
-        # unpack
+                        self.cfg.leg_amp_range[1],  self.cfg.v_amp_range[1]], 
+                        device=self.device)
+        
+        # Map actions from [-1, 1] to parameter ranges
+        # Actions are now DIRECT parameter settings, not deltas
+        self.params = lo + (torch.clamp(self.actions, -1.0, 1.0) + 1.0) * 0.5 * (hi - lo)
+        
+        # Unpack parameters (these will stabilize quickly at episode start)
         wave_num = self.params[:, 0]
         body_amp = self.params[:, 1]
         leg_amp  = self.params[:, 2]
         v_amp    = self.params[:, 3]
 
-        # MuJoCo constants mirrored
+        # ========================================================================
+        # Rest of CPG computation stays the same
+        # ========================================================================
         N = 5
-        num_legs = 5  # Number of legs
+        num_legs = 5
         E = self.scene.num_envs
         xis = 1.0 - wave_num / 5.0
         lfs = xis
         dutyf = 0.5
 
+        # Precompute shape bases
+        idx = torch.arange(N-1, device=self.device, dtype=self.params.dtype)
+        phase_idx = idx.unsqueeze(0) * xis.unsqueeze(1)
+        sb1 = torch.sin(phase_idx * 2.0 * math.pi)
+        sb2 = torch.cos(phase_idx * 2.0 * math.pi)
 
-        # Precompute bases per env: shape_basis* are [E, N]
-        idx = torch.arange(N-1, device=self.device, dtype=self.params.dtype)  # [N]
-        phase_idx = idx.unsqueeze(0) * xis.unsqueeze(1)  # [E, N]
-        sb1 = torch.sin(phase_idx * 2.0 * math.pi)  # [E, N]
-        sb2 = torch.cos(phase_idx * 2.0 * math.pi)  # [E, N]
-
+        # Time-based modulation with smooth ramp-up
         t = torch.zeros_like(wave_num)
-        over = self.time_s > 1.0
-        t[over] = 2.0 * (self.time_s[over] - 1.0 + (math.pi / 2.0))
+        ramp_time = 1.0
+        over = self.time_s > ramp_time
+        t[over] = 2.0 * (self.time_s[over] - ramp_time + (math.pi / 2.0))
+        
+        # Smooth ramp multiplier (parameters settle during this time)
+        ramp_mult = torch.clamp(self.time_s / ramp_time, 0.0, 1.0)
 
-        # CPG / shape fields
-        F1 = _get_F_tw1(t, body_amp)  # [E]
-        F2 = _get_F_tw2(t, body_amp)  # [E]
-        alpha_array = _alpha(F1, sb1, F2, sb2)  # [E, N=4]
-        vertical_alpha = _alpha_v(t, v_amp, xis=xis, N=N, shape_tile=0.0)  # [E, N=4]
+        # CPG computations
+        F1 = _get_F_tw1(t, body_amp)
+        F2 = _get_F_tw2(t, body_amp)
+        alpha_array = _alpha(F1, sb1, F2, sb2) * ramp_mult.unsqueeze(1)
+        vertical_alpha = _alpha_v(t, v_amp, xis=xis, N=N, shape_tile=0.0) * ramp_mult.unsqueeze(1)
 
-        phase_max = lfs * math.pi + math.pi / 2.0  # [E]
-        phi = torch.atan2(F2, F1) - phase_max  # [E]
+        phase_max = lfs * math.pi + math.pi / 2.0
+        phi = torch.atan2(F2, F1) - phase_max
 
-        # Leg contact activations: [E, num_legs]
-        act_array = _get_act(phi, lfs, num_legs, dutyf)  # [E, 5]
+        # Leg activations
+        act_array = _get_act(phi, lfs, num_legs, dutyf)
         act_vals = torch.where(
             act_array > 0,
             torch.full_like(act_array, 0.4),
             torch.full_like(act_array, -0.4),
-        )  # [E, 5]
-        # Duplicate for L/R: [E, 5] -> [E, 5, 2] -> [E, 10]
-        act_vals_LR = act_vals.unsqueeze(2).repeat(1, 1, 2).reshape(E, 2 * num_legs)
+        ) * ramp_mult.unsqueeze(1)
+        
+        # Leg pitch
+        beta_array = _get_beta(phi, num_legs, leg_amp, dutyf, lfs)
+        beta_LR = beta_array.unsqueeze(2).repeat(1, 1, 2).reshape(E, 2 * num_legs) * ramp_mult.unsqueeze(1)
 
-        # Leg pitch offsets: [E, num_legs]
-        beta_array = _get_beta(phi, num_legs, leg_amp, dutyf, lfs)  # [E, 5]
-        # Duplicate for L/R: [E, 5] -> [E, 5, 2] -> [E, 10]
-        beta_LR = beta_array.unsqueeze(2).repeat(1, 1, 2).reshape(E, 2 * num_legs)
-
-        # Zero during initialization
-        under = self.time_s < 1.0
-        if under.any():
-            alpha_array[under] *= 0.0
-            vertical_alpha[under] *= 0.0
-            beta_LR[under] *= 0.0
-            act_vals_LR[under] *= 0.0
-
-        # Concatenate joint targets in correct order
-        # Expected: [leg_swing(5)] + [leg_pitch_L/R(10)] + [spine_h(4)] + [spine_v(4)]
-        # Total: 5 + 10 + 4 + 4 = 23 joints
+        # Assemble joint targets
         q_targets = torch.cat(
             [
-                act_vals,          # [E, 5] - leg swing joints (NOT duplicated)
-                beta_LR,           # [E, 10] - leg pitch L/R
-                alpha_array,       # [E, 4] - spine horizontal
-                vertical_alpha     # [E, 4] - spine vertical
+                act_vals,          # [E, 5]
+                beta_LR,           # [E, 10]
+                alpha_array,       # [E, 4]
+                vertical_alpha     # [E, 4]
             ],
             dim=1,
-        )  # [E, 23]
+        )
 
         ids_all = torch.cat([
-            self.leg_act_joint_ids,    # 5 joints
-            self.leg_pitch_joint_ids,  # 10 joints
-            self.spine_joint_ids,      # 4 joints
-            self.vertical_joint_ids,   # 4 joints
-        ])  # Total: 23 joints
+            self.leg_act_joint_ids,
+            self.leg_pitch_joint_ids,
+            self.spine_joint_ids,
+            self.vertical_joint_ids,
+        ])
 
         self.robot.set_joint_position_target(q_targets, joint_ids=ids_all)
 
@@ -254,16 +259,55 @@ class CentiFlatEnv(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         vx = self.robot.data.root_lin_vel_w[:, 0]
-        vel_err = torch.abs(vx - self.target_vel)
-
-        smooth = torch.norm(self.actions - self.prev_actions, dim=1)
+    
+        # Only accumulate velocity AFTER ramp period (0.5s)
+        after_ramp = self.time_s > 1.0
+        if after_ramp.any():
+            self.vel_sum[after_ramp] += vx[after_ramp]
+            self.vel_count[after_ramp] += 1
+        
+        # Compute average (avoid division by zero early in episode)
+        avg_vx = torch.where(
+            self.vel_count > 0,
+            self.vel_sum / self.vel_count,
+            torch.zeros_like(self.vel_sum)
+        )
+        
+        # 1. Velocity tracking using AVERAGE velocity (exponential falloff)
+        vel_err = torch.abs(avg_vx - self.target_vel)
+        rew_vel_tracking = torch.exp(-3.0 * vel_err)  # Shaped reward
+        
+        # 2. Forward progress (reward any forward movement - instantaneous)
+        rew_progress = torch.clamp(vx, 0.0, 2.0)  # Still use instant for exploration
+        
+        # 3. Action smoothness
+        action_diff = torch.norm(self.actions - self.prev_actions, dim=1)
+        rew_smooth = -action_diff
+        
+        # 4. Joint velocity penalty (energy efficiency)
         qdot = torch.norm(self.robot.data.joint_vel, dim=1)
-
+        rew_eff = -qdot
+        
+        # 5. Orientation penalty (keep robot upright)
+        # Extract roll and pitch from quaternion
+        base_quat = self.robot.data.root_quat_w
+        # qw, qx, qy, qz = base_quat[:, 0], base_quat[:, 1], base_quat[:, 2], base_quat[:, 3]
+        # roll = torch.atan2(2*(qw*qx + qy*qz), 1 - 2*(qx**2 + qy**2))
+        # pitch = torch.asin(2*(qw*qy - qz*qx))
+        # For simplicity, use quat distance from upright [1,0,0,0]
+        quat_upright = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
+        quat_dist = torch.norm(base_quat - quat_upright, dim=1)
+        rew_orientation = torch.exp(-5.0 * quat_dist)
+        
+        # 6. Angular velocity penalty (discourage spinning)
+        ang_vel = torch.norm(self.robot.data.root_ang_vel_w, dim=1)
+        rew_ang_vel = -ang_vel
+        
+        # Combined reward
         rew = (
-            self.cfg.rew_w_alive
-            - self.cfg.rew_w_vel * vel_err
-            - self.cfg.rew_w_smooth * smooth
-            - self.cfg.rew_w_eff * qdot
+            self.cfg.rew_w_alive +
+            self.cfg.rew_w_vel * rew_vel_tracking +
+            self.cfg.rew_w_smooth * rew_smooth
         )
         
         self.prev_actions = self.actions.clone()
@@ -286,6 +330,14 @@ class CentiFlatEnv(DirectRLEnv):
 
         # Reset robot to defaults at each env origin
         default_root = self.robot.data.default_root_state[env_ids]
+        rot_quat = quat_from_euler_xyz(
+            torch.tensor(math.pi/2, device=self.device),
+            torch.tensor(0.0, device=self.device),
+            torch.tensor(0.0, device=self.device),
+        )
+        default_root[:, 3:7] = rot_quat.repeat(len(env_ids), 1)
+        default_root[:, 2] += -0.2  # Raise slightly above ground
+
         default_root[:, :3] += self.scene.env_origins[env_ids]
         self.robot.write_root_pose_to_sim(default_root[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root[:, 7:], env_ids)
@@ -297,7 +349,7 @@ class CentiFlatEnv(DirectRLEnv):
             None,
             env_ids,
         )
-        print(env_ids)
+        # print(env_ids)
 
         # Sample new target velocity per env
         self.target_vel[env_ids] = sample_uniform(
