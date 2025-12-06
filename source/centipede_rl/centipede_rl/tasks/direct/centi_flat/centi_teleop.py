@@ -39,8 +39,6 @@ from centipede_rl.assets.robots.centipede_robot import CENTI_FLAT_ROBOT_CFG
 current_command = "stop"
 command_lock = threading.Lock()
 
-# --- OLEG_CONFIG: Custom robot configuration ---
-
 class NewRobotsSceneCfg(InteractiveSceneCfg):
     """Designs the scene."""
     # Ground-plane
@@ -51,17 +49,6 @@ class NewRobotsSceneCfg(InteractiveSceneCfg):
         prim_path="/World/Light", 
         spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75))
     )
-    obstacle = AssetBaseCfg(
-        prim_path="/World/obstacle", 
-        spawn=sim_utils.UsdFileCfg(
-        usd_path="source/centipede_rl/centipede_rl/assets/O_leg/maze_v1.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,
-                max_depenetration_velocity=5.0,
-            )
-        )
-    )
-
     
     # robot
     Oleg = CENTI_FLAT_ROBOT_CFG.replace(prim_path="{ENV_REGEX_NS}/Oleg")
@@ -113,7 +100,7 @@ def keyboard_listener():
                 else:
                     print(f"Command: {command_mapping[user_input]}")
             else:
-                print(f"Invalid input '{user_input}'. Use w/a/s/d/x/q")
+                print(f"Invalid input '{user_input}'. Use w/a/s/d/f/x/z/c/e/q")
         except (EOFError, KeyboardInterrupt):
             with command_lock:
                 current_command = 'quit'
@@ -122,26 +109,37 @@ def keyboard_listener():
 def apply_motion_pattern(robot, command, sim_time, temporal_freq, wave_action, joint_pos_all, env_ind):
     """Apply the motion pattern based on the current command."""
     
-    # Wave parameters
+    # Wave parameters for 5-leg robot
     wave_num = 1.3
-    N = 6
-    xis = 1-wave_num/6
+    N = 5  # 5 legs
+    xis = 1 - wave_num / 5
     lfs = xis
-    num_leg = N
+    num_leg = 5
     body_amp = np.radians(15)
     leg_amp = np.radians(35)
     v_amp = -np.radians(30)
+    dutyf = 0.5
     
-    # Shape basis functions
-    shape_basis1 = np.sin(np.arange(0, xis * (N - 1), xis)*2*np.pi)
-    shape_basis2 = np.cos(np.arange(0, xis * (N - 1), xis)*2*np.pi)
-    phase_max = lfs*np.pi + np.pi/2
+    # Shape basis functions (N-1 = 4 body segments)
+    shape_basis1 = np.sin(np.arange(0, xis * (N - 1), xis) * 2 * np.pi)
+    shape_basis2 = np.cos(np.arange(0, xis * (N - 1), xis) * 2 * np.pi)
+    phase_max = lfs * np.pi + np.pi / 2
     
-    # Joint indices
-    left_legs = np.array([2, 6, 10, 14, 18, 21])
-    right_legs = np.array([1, 5, 9, 13, 17, 20])
-    body_horizontal = np.array([0, 4, 8, 12, 16])
-    body_vertical = np.array([3, 7, 11, 15, 19])
+    # Get joint indices by name (correct way for your robot)
+    leg_swing_names = ["leg_swing_joint1", "leg_swing_joint2", "leg_swing_joint3", 
+                       "leg_swing_joint4", "leg_swing_joint5"]
+    left_leg_names = ["l_leg_joint1", "l_leg_joint2", "l_leg_joint3", 
+                      "l_leg_joint4", "l_leg_joint5"]
+    right_leg_names = ["r_leg_joint1", "r_leg_joint2", "r_leg_joint3", 
+                       "r_leg_joint4", "r_leg_joint5"]
+    spine_names = ["body_h1", "body_h2", "body_h3", "body_h4"]
+    vertical_names = ["body_v1", "body_v2", "body_v3", "body_v4"]
+    
+    leg_swing_ids = robot.find_joints(leg_swing_names)[0]
+    left_leg_ids = robot.find_joints(left_leg_names)[0]
+    right_leg_ids = robot.find_joints(right_leg_names)[0]
+    spine_ids = robot.find_joints(spine_names)[0]
+    vertical_ids = robot.find_joints(vertical_names)[0]
     
     if command == "stop":
         # Return to neutral position
@@ -149,68 +147,94 @@ def apply_motion_pattern(robot, command, sim_time, temporal_freq, wave_action, j
 
     elif command in ["backward", "forward", "left", "right", "lift_front"]:
         # Calculate wave motion
-        F_tw1 = get_F_tw1(temporal_freq*sim_time, body_amp)
-        F_tw2 = get_F_tw2(temporal_freq*sim_time, body_amp)
+        F_tw1 = get_F_tw1(temporal_freq * sim_time, body_amp)
+        F_tw2 = get_F_tw2(temporal_freq * sim_time, body_amp)
         phi = math.atan2(F_tw2, F_tw1) - phase_max
         alpha_array = alpha(F_tw1, shape_basis1, F_tw2, shape_basis2)
-        vertical_alpha = alpha_v(temporal_freq*sim_time, v_amp, xis, N, 0)
+        vertical_alpha = alpha_v(temporal_freq * sim_time, v_amp, xis, N, 0)
         
-        left_wheel_angle = get_wheel_angle(-temporal_freq*sim_time - phi, lfs, num_leg)
-        right_wheel_angle = get_wheel_angle(-temporal_freq*sim_time - phi + np.pi, lfs, num_leg)
-        
-        # Apply leg motion
+        # Calculate leg pitch angles (beta)
+        beta_array = np.zeros(num_leg)
         for ind in range(num_leg):
-            left_legs_current_ind = joint_pos_all[env_ind, left_legs[ind]]
-            right_legs_current_ind = joint_pos_all[env_ind, right_legs[ind]]
-            
-            wheel_angle_left_ind = nearest_equivalent_angle(left_legs_current_ind, left_wheel_angle[0, ind])
-            wheel_angle_right_ind = nearest_equivalent_angle(right_legs_current_ind, right_wheel_angle[0, ind])
-            
-            wave_action[env_ind, left_legs[ind]] = wheel_angle_left_ind
-            wave_action[env_ind, right_legs[ind]] = wheel_angle_right_ind
+            time_offset = -temporal_freq * sim_time - phi + ind * lfs * 2 * np.pi
+            beta_array[ind] = -F_Leg(leg_amp, time_offset, dutyf)
         
-        # Apply body motion
+        # Calculate leg swing activations
+        swing_array = np.zeros(num_leg)
+        for ind in range(num_leg):
+            time_offset = -temporal_freq * sim_time - phi + ind * lfs * 2 * np.pi
+            swing_val = F_leg_act(time_offset, dutyf)
+            swing_array[ind] = 0.4 if swing_val > 0 else -0.4
+        
+        # Apply leg swing activations
+        for ind in range(num_leg):
+            wave_action[env_ind, leg_swing_ids[ind]] = swing_array[ind]
+        
+        # Apply leg pitch (beta) to left and right legs
+        for ind in range(num_leg):
+            wave_action[env_ind, left_leg_ids[ind]] = beta_array[ind]
+            wave_action[env_ind, right_leg_ids[ind]] = beta_array[ind]
+        
+        # Apply body horizontal (spine) motion
         for i in range(len(alpha_array)):
-            wave_action[env_ind, body_horizontal[i]] = alpha_array[i]
-            wave_action[env_ind, body_vertical[i]] = vertical_alpha[i]
+            wave_action[env_ind, spine_ids[i]] = alpha_array[i]
+        
+        # Apply body vertical motion
+        for i in range(len(vertical_alpha)):
+            wave_action[env_ind, vertical_ids[i]] = vertical_alpha[i]
+        
+        # Command-specific modifications
         if command == "backward":
-            # wave_action[env_ind, body_vertical] = -wave_action[env_ind, body_vertical]
-            wave_action[env_ind, body_horizontal] = -wave_action[env_ind, body_horizontal]
-            left_wheel_angle = get_wheel_angle(temporal_freq*sim_time + phi, lfs, num_leg)
-            right_wheel_angle = get_wheel_angle(temporal_freq*sim_time + phi + np.pi, lfs, num_leg)
+            # Reverse horizontal body motion
+            for i in range(len(alpha_array)):
+                wave_action[env_ind, spine_ids[i]] = -alpha_array[i]
             
-            # Apply leg motion
+            # Recalculate leg motions with reversed phase
             for ind in range(num_leg):
-                left_legs_current_ind = joint_pos_all[env_ind, left_legs[ind]]
-                right_legs_current_ind = joint_pos_all[env_ind, right_legs[ind]]
-                
-                wheel_angle_left_ind = nearest_equivalent_angle(left_legs_current_ind, left_wheel_angle[0, ind])
-                wheel_angle_right_ind = nearest_equivalent_angle(right_legs_current_ind, right_wheel_angle[0, ind])
-                
-                wave_action[env_ind, left_legs[ind]] = wheel_angle_left_ind
-                wave_action[env_ind, right_legs[ind]] = wheel_angle_right_ind
-        # Add turning bias
-        if command == "left":
-            wave_action[env_ind, body_horizontal[0:3]] = -0.7
+                time_offset = temporal_freq * sim_time + phi + ind * lfs * 2 * np.pi
+                beta_array[ind] = -F_Leg(leg_amp, time_offset, dutyf)
+                swing_val = F_leg_act(time_offset, dutyf)
+                swing_array[ind] = 0.4 if swing_val > 0 else -0.4
+            
+            # Reapply reversed leg motions
+            for ind in range(num_leg):
+                wave_action[env_ind, leg_swing_ids[ind]] = swing_array[ind]
+                wave_action[env_ind, left_leg_ids[ind]] = beta_array[ind]
+                wave_action[env_ind, right_leg_ids[ind]] = beta_array[ind]
+        
+        elif command == "left":
+            # Turn left by biasing front body segments
+            for i in range(min(3, len(spine_ids))):
+                wave_action[env_ind, spine_ids[i]] = -0.7
+        
         elif command == "right":
-            wave_action[env_ind, body_horizontal[0:3]] = 0.7
-        if command == "lift_front":
-            wave_action[env_ind, body_vertical[0]] = -0.8
-            # wave_action[env_ind, body_vertical[1]] = 0.3
+            # Turn right by biasing front body segments
+            for i in range(min(3, len(spine_ids))):
+                wave_action[env_ind, spine_ids[i]] = 0.7
+        
+        elif command == "lift_front":
+            # Lift front body segment
+            wave_action[env_ind, vertical_ids[0]] = -0.8
             
     elif command == "self_right":
         # Self-rolling motion
-        wave_action[env_ind, body_vertical] = 0.7 * np.sin(0.5*temporal_freq * sim_time)
-        wave_action[env_ind, body_horizontal] = 0.7 * np.cos(0.5*temporal_freq * sim_time)
+        for i in range(len(vertical_ids)):
+            wave_action[env_ind, vertical_ids[i]] = 0.7 * np.sin(0.5 * temporal_freq * sim_time)
+        for i in range(len(spine_ids)):
+            wave_action[env_ind, spine_ids[i]] = 0.7 * np.cos(0.5 * temporal_freq * sim_time)
 
-    elif command== "side_winding_left":
-
-        wave_action[env_ind, body_vertical] = 0.3 * np.cos(temporal_freq* sim_time)
-        wave_action[env_ind, body_horizontal] = 0.3* np.sin(temporal_freq* sim_time)
+    elif command == "side_winding_left":
+        for i in range(len(vertical_ids)):
+            wave_action[env_ind, vertical_ids[i]] = 0.3 * np.cos(temporal_freq * sim_time)
+        for i in range(len(spine_ids)):
+            wave_action[env_ind, spine_ids[i]] = 0.3 * np.sin(temporal_freq * sim_time)
 
     elif command == "side_winding_right":
-        wave_action[env_ind, body_vertical] = 0.3 * np.cos(temporal_freq* sim_time)
-        wave_action[env_ind, body_horizontal] = -0.3 * np.sin(temporal_freq* sim_time)
+        for i in range(len(vertical_ids)):
+            wave_action[env_ind, vertical_ids[i]] = 0.3 * np.cos(temporal_freq * sim_time)
+        for i in range(len(spine_ids)):
+            wave_action[env_ind, spine_ids[i]] = -0.3 * np.sin(temporal_freq * sim_time)
+    
     return wave_action
 
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
@@ -239,32 +263,31 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # Check for quit command
         if command == 'quit':
             break
-        cycle_time = 0
-        while cycle_time < 2*np.pi/temporal_freq:
-            # Initialize wave action with default positions
-            wave_action = robot.data.default_joint_pos.clone()
-            joint_pos_all = robot.data.joint_pos
-            
-            # Apply motion for each environment
-            for env_ind in range(env_num):
-                wave_action = apply_motion_pattern(
-                    robot, command, sim_time, temporal_freq, 
-                    wave_action, joint_pos_all, env_ind
-                )
-            
-            # Apply the action to the robot
-            robot.set_joint_position_target(wave_action)
-            
-            # Step simulation
-            scene.write_data_to_sim()
-            sim.step()
-            sim_time += sim_dt
-            count += 1
-            scene.update(sim_dt)
-            cycle_time += sim_dt
-            # Optional: Print status every few seconds
-            if count % 240 == 0:  # Every ~5 seconds at 48Hz
-                print(f"Time: {sim_time:.1f}s, Current command: {command}")
+        
+        # Initialize wave action with default positions
+        wave_action = robot.data.default_joint_pos.clone()
+        joint_pos_all = robot.data.joint_pos
+        
+        # Apply motion for each environment
+        for env_ind in range(env_num):
+            wave_action = apply_motion_pattern(
+                robot, command, sim_time, temporal_freq, 
+                wave_action, joint_pos_all, env_ind
+            )
+        
+        # Apply the action to the robot
+        robot.set_joint_position_target(wave_action)
+        
+        # Step simulation
+        scene.write_data_to_sim()
+        sim.step()
+        sim_time += sim_dt
+        count += 1
+        scene.update(sim_dt)
+        
+        # Optional: Print status every few seconds
+        if count % 240 == 0:  # Every ~5 seconds at 48Hz
+            print(f"Time: {sim_time:.1f}s, Current command: {command}")
 
 def main():
     """Main function."""

@@ -8,7 +8,7 @@ from . import agents
 
 # Register Gym environments for the centi_flat task
 gym.register(
-    id="Centi-Flat-Direct-v0",
+    id="Centi-Flat",
     entry_point=f"{__name__}.centi_flat_env:CentiFlatEnv",
     disable_env_checker=True,
     kwargs={
